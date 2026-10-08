@@ -15,12 +15,12 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 
 from app.cleaner import clean
-from app.browser import close_browser_context
+from app.browser import close_browser_context, complete_xhs_login, open_xhs_login_page
 from app.config import DATA_DIR
 from app.db import get_document, init_db
 from app.exceptions import FetchError
 from app.publisher import publish
-from app.router import route
+from app.router import extract_xhs_note_url, route
 
 
 logger = logging.getLogger(__name__)
@@ -56,13 +56,19 @@ def _render_index(
     *,
     error: str | None = None,
     read_url: str | None = None,
+    status_message: str | None = None,
     input_url: str = "",
     status_code: int = 200,
 ) -> HTMLResponse:
     return TEMPLATES.TemplateResponse(
         request=request,
         name="index.html",
-        context={"error": error, "read_url": read_url, "input_url": input_url},
+        context={
+            "error": error,
+            "read_url": read_url,
+            "status_message": status_message,
+            "input_url": input_url,
+        },
         status_code=status_code,
     )
 
@@ -113,6 +119,26 @@ async def health() -> str:
     return "ai-reader running"
 
 
+@app.post("/xhs/login", response_class=HTMLResponse)
+async def open_xhs_login(request: Request) -> HTMLResponse:
+    """Open the XHS login page in the persistent headed Edge context."""
+    try:
+        await open_xhs_login_page()
+    except FetchError as exc:
+        return _render_index(request, error=str(exc))
+    return _render_index(
+        request,
+        status_message="已在 Edge 中打开小红书登录页；完成登录后返回此页点击“我已完成登录”。",
+    )
+
+
+@app.post("/xhs/login/complete", response_class=HTMLResponse)
+async def finish_xhs_login(request: Request) -> HTMLResponse:
+    """Release the fetch gate after the user confirms manual login."""
+    await complete_xhs_login()
+    return _render_index(request, status_message="已确认登录流程完成，现在可以提交小红书笔记链接。")
+
+
 @app.post("/", response_class=HTMLResponse)
 async def submit(
     request: Request,
@@ -127,7 +153,7 @@ async def submit(
 
     try:
         if bool(input_url) == has_upload:
-            raise FetchError("请填写一个公众号链接，或选择一个 PDF 文件；每次只提交一种输入。")
+            raise FetchError("请填写一个公众号或小红书链接，或选择一个 PDF 文件；每次只提交一种输入。")
 
         if has_upload:
             stage = "save_pdf_upload"
@@ -141,7 +167,10 @@ async def submit(
         else:
             parsed = urlsplit(input_url)
             if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-                raise FetchError("请提交受支持的公众号网页链接；PDF 请使用文件上传。")
+                if extract_xhs_note_url(input_url) is None:
+                    raise FetchError(
+                        "请提交受支持的公众号链接、小红书笔记链接或包含有效小红书链接的分享文本；PDF 请使用文件上传。"
+                    )
             stage = "fetch_source"
             fetched = await route(input_url)
 

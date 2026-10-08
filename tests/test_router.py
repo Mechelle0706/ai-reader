@@ -37,21 +37,50 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
         fetch_wechat.assert_awaited_once_with(url)
         self.assertEqual(result, expected)
 
+    async def test_xhs_dispatches_to_async_fetcher(self):
+        url = "https://www.xiaohongshu.com/explore/example"
+        expected = {"source_type": "xhs", "raw_kind": "text"}
+        with patch("app.router.fetch_xhs", new_callable=AsyncMock, return_value=expected) as fetch_xhs:
+            result = await route(url)
+        fetch_xhs.assert_awaited_once_with(url)
+        self.assertEqual(result, expected)
+
+    async def test_xhs_share_text_extracts_discovery_url_and_preserves_token(self):
+        url = (
+            "https://www.xiaohongshu.com/discovery/item/6ab782660000000018004d15"
+            "?source=webshare&xhsshare=pc_web&xsec_token=AB_vQgjn6Xh2Dxtu5SLPRecxllVW7fOUQldYjErjNkCdg="
+            "&xsec_source=pc_share"
+        )
+        share_text = (
+            "29 【为什么认真学习会让身体变得脆弱容易生病啊 - 面儿同学 | 小红书 - 你的生活兴趣社区】 "
+            f"😆 8AmEm3N7DRAPW1P 😆 {url}"
+        )
+        expected = {"source_type": "xhs", "raw_kind": "text"}
+        with patch("app.router.fetch_xhs", new_callable=AsyncMock, return_value=expected) as fetch_xhs:
+            result = await route(share_text)
+
+        fetch_xhs.assert_awaited_once_with(url)
+        self.assertEqual(result, expected)
+
+    async def test_xhs_address_bar_explore_url_preserves_token(self):
+        url = "https://www.xiaohongshu.com/explore/XXXX?xsec_token=token-value&xsec_source=pc_feed"
+        expected = {"source_type": "xhs", "raw_kind": "text"}
+        with patch("app.router.fetch_xhs", new_callable=AsyncMock, return_value=expected) as fetch_xhs:
+            result = await route(url)
+
+        fetch_xhs.assert_awaited_once_with(url)
+        self.assertEqual(result, expected)
+
+    async def test_invalid_share_text_gets_friendly_error(self):
+        with self.assertRaisesRegex(FetchError, "未能从分享文本中提取有效的小红书笔记链接"):
+            await route("分享标题 😆 https://example.com/not-a-note")
+
     async def test_bilibili_is_pending_without_calling_fetcher(self):
         with patch("app.router.fetch_pdf") as fetch_pdf, patch(
             "app.router.fetch_wechat", new_callable=AsyncMock
         ) as fetch_wechat:
             with self.assertRaisesRegex(FetchError, "B 站字幕功能暂停.*待 U8"):
                 await route("https://www.bilibili.com/video/BV1234567890")
-        fetch_pdf.assert_not_called()
-        fetch_wechat.assert_not_awaited()
-
-    async def test_xhs_is_pending_without_calling_fetcher(self):
-        with patch("app.router.fetch_pdf") as fetch_pdf, patch(
-            "app.router.fetch_wechat", new_callable=AsyncMock
-        ) as fetch_wechat:
-            with self.assertRaisesRegex(FetchError, "小红书抓取待 U8"):
-                await route("https://www.xiaohongshu.com/explore/example")
         fetch_pdf.assert_not_called()
         fetch_wechat.assert_not_awaited()
 

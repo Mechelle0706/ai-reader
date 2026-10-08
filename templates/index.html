@@ -11,12 +11,17 @@
     .notice { color: #555; margin: 0 0 28px; }
     form { border: 1px solid #ddd; border-radius: 12px; padding: 24px; }
     label { display: block; font-weight: 600; margin: 18px 0 6px; }
-    input[type="url"], input[type="file"] { box-sizing: border-box; width: 100%; padding: 10px; }
+    input[type="text"], input[type="file"] { box-sizing: border-box; width: 100%; padding: 10px; }
     button { margin-top: 22px; padding: 10px 18px; border: 0; border-radius: 6px; background: #1769aa; color: white; font-size: 1rem; cursor: pointer; }
     .message { margin-top: 22px; padding: 14px 16px; border-radius: 8px; }
     .error { background: #fff1f0; color: #8c1d18; }
     .success { background: #edf7ed; color: #1e4620; }
     .hint { color: #666; font-size: .92rem; }
+    .login-controls { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 18px; }
+    .login-controls form { border: 0; border-radius: 0; padding: 0; }
+    .login-controls button { margin-top: 0; }
+    .secondary { background: #555; }
+    @media (max-width: 520px) { .login-controls form, .login-controls button { width: 100%; } }
   </style>
 </head>
 <body>
@@ -24,17 +29,31 @@
   <p class="notice">本机内容中转工具。生成的阅读链接仅供运行服务的本机访问。</p>
 
   <form action="/" method="post" enctype="multipart/form-data">
-    <label for="url">公众号文章链接</label>
-    <input id="url" name="url" type="url" placeholder="https://mp.weixin.qq.com/s/..." value="{{ input_url }}">
-    <p class="hint">目前公众号链接和 PDF 文件支持真实处理；小红书与 B 站待 U8 浏览器方案接入。</p>
+    <label for="url">公众号文章或小红书笔记链接</label>
+    <input id="url" name="url" type="text" placeholder="粘贴受支持的内容链接或小红书分享文本" value="{{ input_url }}">
+    <p class="hint">支持公众号、小红书和 PDF；B 站字幕功能暂未接入。</p>
 
     <label for="pdf_file">或上传 PDF 文件（最大 20 MiB）</label>
     <input id="pdf_file" name="pdf_file" type="file" accept=".pdf,application/pdf">
     <button type="submit">获取并生成阅读页</button>
   </form>
 
+  <div class="login-controls">
+    <form action="/xhs/login" method="post">
+      <button class="secondary" type="submit">打开小红书登录</button>
+    </form>
+    <form action="/xhs/login/complete" method="post">
+      <button type="submit">我已完成登录</button>
+    </form>
+  </div>
+  <p class="hint">请在 Edge 中由本人正常登录；完成后点击确认，再提交笔记链接。</p>
+
   {% if error %}
   <div class="message error" role="alert">{{ error }}</div>
+  {% endif %}
+
+  {% if status_message %}
+  <div class="message success" role="status">{{ status_message }}</div>
   {% endif %}
 
   {% if read_url %}

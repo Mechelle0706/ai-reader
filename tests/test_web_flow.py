@@ -50,8 +50,23 @@ class WebFlowTests(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn('name="url"', response.text)
+        self.assertIn('name="url" type="text"', response.text)
+        self.assertNotIn('name="url" type="url"', response.text)
         self.assertIn('name="pdf_file"', response.text)
         self.assertIn("20 MiB", response.text)
+        self.assertIn("打开小红书登录", response.text)
+        self.assertIn("我已完成登录", response.text)
+
+    def test_xhs_login_controls_open_and_complete_manual_login(self):
+        with patch("app.main.open_xhs_login_page", new_callable=AsyncMock) as open_login:
+            opened = self.client.post("/xhs/login")
+        open_login.assert_awaited_once()
+        self.assertIn("已在 Edge 中打开小红书登录页", opened.text)
+
+        with patch("app.main.complete_xhs_login", new_callable=AsyncMock) as complete_login:
+            completed = self.client.post("/xhs/login/complete")
+        complete_login.assert_awaited_once()
+        self.assertIn("现在可以提交小红书笔记链接", completed.text)
 
     def test_graceful_app_shutdown_closes_persistent_browser_context(self):
         with patch("app.main.close_browser_context", new_callable=AsyncMock) as close_context:
@@ -78,6 +93,51 @@ class WebFlowTests(unittest.TestCase):
         self.assertEqual(read_response.status_code, 200)
         self.assertIn("文章流程验收", read_response.text)
         self.assertIn("公众号正文直接进入清洗与发布。", read_response.text)
+
+    def test_xhs_runs_fetch_clean_publish_and_read(self):
+        url = "https://www.xiaohongshu.com/explore/example?xsec_token=address-token&xsec_source=pc_feed"
+        fetched = {
+            "source_type": "xhs",
+            "source_url": url,
+            "title": "小红书流程验收",
+            "raw_kind": "text",
+            "raw": "笔记正文直接进入清洗与发布。",
+        }
+        with patch("app.router.fetch_xhs", new_callable=AsyncMock, return_value=fetched) as fetch:
+            response = self.client.post("/", data={"url": url})
+
+        fetch.assert_awaited_once_with(url)
+        self.assertEqual(response.status_code, 200)
+        read_response = self.client.get(_read_path(response))
+        self.assertEqual(read_response.status_code, 200)
+        self.assertIn("小红书流程验收", read_response.text)
+        self.assertIn("笔记正文直接进入清洗与发布。", read_response.text)
+
+    def test_xhs_share_text_runs_through_fetch_pipeline(self):
+        url = (
+            "https://www.xiaohongshu.com/discovery/item/6ab782660000000018004d15"
+            "?source=webshare&xhsshare=pc_web&xsec_token=AB_vQgjn6Xh2Dxtu5SLPRecxllVW7fOUQldYjErjNkCdg="
+            "&xsec_source=pc_share"
+        )
+        share_text = (
+            "29 【为什么认真学习会让身体变得脆弱容易生病啊 - 面儿同学 | 小红书 - 你的生活兴趣社区】 "
+            f"😆 8AmEm3N7DRAPW1P 😆 {url}"
+        )
+        fetched = {
+            "source_type": "xhs",
+            "source_url": url,
+            "title": "为什么认真学习会让身体变得脆弱容易生病啊 - 面儿同学",
+            "raw_kind": "text",
+            "raw": "分享文本提取后的正文。",
+        }
+        with patch("app.router.fetch_xhs", new_callable=AsyncMock, return_value=fetched) as fetch:
+            response = self.client.post("/", data={"url": share_text})
+
+        fetch.assert_awaited_once_with(url)
+        self.assertEqual(response.status_code, 200)
+        read_response = self.client.get(_read_path(response))
+        self.assertIn("为什么认真学习会让身体变得脆弱容易生病啊 - 面儿同学", read_response.text)
+        self.assertIn("分享文本提取后的正文。", read_response.text)
 
     def test_pdf_upload_runs_real_fetch_clean_publish_and_removes_temp_file(self):
         response = self.client.post(
@@ -124,15 +184,12 @@ class WebFlowTests(unittest.TestCase):
         local_path = self.client.post("/", data={"url": r"C:\private\file.pdf"})
         self.assertIn("PDF 请使用文件上传", local_path.text)
 
-    def test_xhs_and_bilibili_keep_friendly_u8_placeholders(self):
-        for url, message in (
-            ("https://www.xiaohongshu.com/explore/example", "小红书抓取待 U8"),
-            ("https://www.bilibili.com/video/BV1234567890", "B 站字幕功能暂停"),
-        ):
-            with self.subTest(url=url):
-                response = self.client.post("/", data={"url": url})
-                self.assertEqual(response.status_code, 200)
-                self.assertIn(message, response.text)
+    def test_bilibili_keeps_friendly_u8_placeholder(self):
+        response = self.client.post(
+            "/", data={"url": "https://www.bilibili.com/video/BV1234567890"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("B 站字幕功能暂停", response.text)
         with db._connection() as connection:
             count = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
         self.assertEqual(count, 0)

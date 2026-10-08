@@ -13,6 +13,7 @@ env/
 !.env.example
 
 # Runtime data and browser login state
+data/
 data/reader.db
 data/reader.db-*
 data/browser_profile/
