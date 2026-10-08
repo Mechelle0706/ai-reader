@@ -1,0 +1,12 @@
+# Runtime and content-processing dependencies for the MVP.
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+python-multipart>=0.0.9,<1.0
+Jinja2>=3.1,<4.0
+python-dotenv>=1.0,<2.0
+playwright>=1.48,<2.0
+PyMuPDF>=1.24,<2.0
+trafilatura>=2.0,<3.0
+markdownify>=0.13,<2.0
+bilibili-api-python>=17.0,<20.0
+httpx>=0.27,<1.0

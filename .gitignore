@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.Python
+venv/
+.venv/
+env/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Runtime data and browser login state
+data/reader.db
+data/reader.db-*
+data/browser_profile/
+data/uploads/
+data/tmp/
+
+# Local test material and generated files
+tests/private/
+tests/*.pdf
+*.log
+.pytest_cache/

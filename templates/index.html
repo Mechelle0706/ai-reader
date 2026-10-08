@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 阅读器</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, "Microsoft YaHei", sans-serif; }
+    body { max-width: 760px; margin: 48px auto; padding: 0 20px; color: #202124; line-height: 1.6; }
+    h1 { margin-bottom: 8px; }
+    .notice { color: #555; margin: 0 0 28px; }
+    form { border: 1px solid #ddd; border-radius: 12px; padding: 24px; }
+    label { display: block; font-weight: 600; margin: 18px 0 6px; }
+    input[type="url"], input[type="file"] { box-sizing: border-box; width: 100%; padding: 10px; }
+    button { margin-top: 22px; padding: 10px 18px; border: 0; border-radius: 6px; background: #1769aa; color: white; font-size: 1rem; cursor: pointer; }
+    .message { margin-top: 22px; padding: 14px 16px; border-radius: 8px; }
+    .error { background: #fff1f0; color: #8c1d18; }
+    .success { background: #edf7ed; color: #1e4620; }
+    .hint { color: #666; font-size: .92rem; }
+  </style>
+</head>
+<body>
+  <h1>AI 阅读器</h1>
+  <p class="notice">本机内容中转工具。生成的阅读链接仅供运行服务的本机访问。</p>
+
+  <form action="/" method="post" enctype="multipart/form-data">
+    <label for="url">公众号文章链接</label>
+    <input id="url" name="url" type="url" placeholder="https://mp.weixin.qq.com/s/..." value="{{ input_url }}">
+    <p class="hint">目前公众号链接和 PDF 文件支持真实处理；小红书与 B 站待 U8 浏览器方案接入。</p>
+
+    <label for="pdf_file">或上传 PDF 文件（最大 20 MiB）</label>
+    <input id="pdf_file" name="pdf_file" type="file" accept=".pdf,application/pdf">
+    <button type="submit">获取并生成阅读页</button>
+  </form>
+
+  {% if error %}
+  <div class="message error" role="alert">{{ error }}</div>
+  {% endif %}
+
+  {% if read_url %}
+  <div class="message success" role="status">
+    内容已保存到本机：<a href="{{ read_url }}">打开阅读页</a>
+    <div><code>{{ read_url }}</code></div>
+  </div>
+  {% endif %}
+</body>
+</html>
