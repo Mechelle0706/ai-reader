@@ -1,5 +1,6 @@
 """Fetch an accessible Xiaohongshu note through the user's Edge profile."""
 
+import asyncio
 import re
 from urllib.parse import urlsplit
 
@@ -8,6 +9,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.browser import browser_operation_lock, get_browser_context, require_xhs_login_complete
 from app.exceptions import FetchError
+from app.fetchers.xhs_ocr import recognize_image_bytes
 
 
 _NOTE_TITLE_SELECTORS = (
@@ -42,6 +44,19 @@ _COMMENT_TEXT_SELECTORS = (
     ".comment-inner-container .note-text",
     ".comment-inner-container .content",
 )
+_NOTE_IMAGE_SELECTOR = ".xhs-slider-container .swiper-slide .note-slider-img > img"
+_NOTE_IMAGE_SLIDER_SELECTOR = ".xhs-slider-container"
+_NOTE_IMAGE_SLIDE_SELECTOR = ".xhs-slider-container .swiper-slide"
+_ACTIVE_NOTE_IMAGE_SELECTOR = ".xhs-slider-container .swiper-slide-active .note-slider-img > img"
+_ALLOWED_IMAGE_HOST = "sns-webpic-qc.xhscdn.com"
+_MAX_NOTE_IMAGES = 9
+_MAX_IMAGE_DOM_CANDIDATES = 36
+_MAX_IMAGE_SLIDE_ADVANCES = 18
+_MAX_IMAGE_BYTES = 5 * 1024 * 1024
+_MAX_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024
+_IMAGE_REQUEST_TIMEOUT_MS = 15000
+_IMAGE_LOAD_WAIT_MS = 700
+_ACTIVE_IMAGE_WAIT_TIMEOUT_MS = 1200
 _MAX_COMMENT_ITEMS = 50
 _MAX_COMMENT_SCROLLS = 6
 _COMMENT_SCROLL_WAIT_MS = 1000
@@ -142,6 +157,172 @@ async def _extract_title(page, body_text: str) -> str:
 
     first_body_line = next((line.strip() for line in body_text.splitlines() if line.strip()), "")
     return first_body_line[:120] or "小红书笔记"
+
+
+def _is_allowed_image_url(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return False
+
+    return (
+        parsed.scheme.lower() == "https"
+        and parsed.hostname == _ALLOWED_IMAGE_HOST
+        and parsed.username is None
+        and parsed.password is None
+        and port in (None, 443)
+    )
+
+
+async def _read_note_image_urls(page) -> tuple[list[str], bool]:
+    slider = page.locator(_NOTE_IMAGE_SLIDER_SELECTOR).first
+    if await slider.count() == 0:
+        return [], False
+
+    async def _collect_urls() -> list[str]:
+        urls: list[str] = []
+        seen: set[str] = set()
+        images = page.locator(_NOTE_IMAGE_SELECTOR)
+        candidate_count = min(await images.count(), _MAX_IMAGE_DOM_CANDIDATES)
+        for index in range(candidate_count):
+            image = images.nth(index)
+            image_url = (await image.evaluate(
+                "element => element.currentSrc || element.src || element.getAttribute('data-src') || element.getAttribute('data-lazy-src') || ''"
+            )).strip()
+            if image_url and image_url not in seen:
+                seen.add(image_url)
+                urls.append(image_url)
+                if len(urls) > _MAX_NOTE_IMAGES:
+                    break
+        return urls
+
+    await slider.scroll_into_view_if_needed()
+    await page.wait_for_timeout(300)
+    await _raise_if_challenged(page)
+
+    urls = await _collect_urls()
+    slides = page.locator(_NOTE_IMAGE_SLIDE_SELECTOR)
+    slide_count = min(await slides.count(), _MAX_IMAGE_DOM_CANDIDATES)
+    advances = 0
+    while len(urls) < _MAX_NOTE_IMAGES and advances < min(slide_count, _MAX_IMAGE_SLIDE_ADVANCES):
+        await _raise_if_challenged(page)
+        box = await slider.bounding_box()
+        if box is None:
+            break
+
+        center_y = box["y"] + box["height"] / 2
+        start_x = box["x"] + box["width"] * 0.78
+        end_x = box["x"] + box["width"] * 0.22
+        await page.mouse.move(start_x, center_y)
+        await page.mouse.down()
+        await page.mouse.move(end_x, center_y, steps=5)
+        await page.mouse.up()
+        advances += 1
+
+        await page.wait_for_timeout(_IMAGE_LOAD_WAIT_MS)
+        await _raise_if_challenged(page)
+        active_image = page.locator(_ACTIVE_NOTE_IMAGE_SELECTOR).first
+        try:
+            await active_image.wait_for(state="attached", timeout=_ACTIVE_IMAGE_WAIT_TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            pass
+        await _raise_if_challenged(page)
+        urls = await _collect_urls()
+
+    truncated = len(urls) > _MAX_NOTE_IMAGES or (
+        len(urls) >= _MAX_NOTE_IMAGES
+        and advances < min(slide_count, _MAX_IMAGE_SLIDE_ADVANCES)
+    )
+    return urls[:_MAX_NOTE_IMAGES], truncated
+
+
+async def _download_note_image(context, image_url: str, remaining_bytes: int) -> tuple[bytes | None, str | None, bool]:
+    if not _is_allowed_image_url(image_url):
+        return None, "图片地址不在允许的图片域名内，已跳过。", False
+
+    response = None
+    try:
+        response = await context.request.get(
+            image_url,
+            timeout=_IMAGE_REQUEST_TIMEOUT_MS,
+            max_redirects=0,
+        )
+        if response.status in {401, 403, 412, 429}:
+            raise FetchError("小红书图片请求触发登录限制或访问风控，已停止抓取。")
+        if 300 <= response.status < 400:
+            return None, "图片请求发生跳转，已跳过。", False
+        if response.status != 200:
+            return None, f"图片请求返回 HTTP {response.status}，已跳过。", False
+
+        headers = response.headers
+        content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if not content_type.startswith("image/"):
+            return None, "响应不是图片格式，已跳过。", False
+
+        content_length = headers.get("content-length")
+        if content_length is None or not content_length.isdigit():
+            return None, "图片大小无法核验，已跳过。", False
+        declared_size = int(content_length)
+        if declared_size > _MAX_IMAGE_BYTES:
+            return None, "图片超过 5 MiB 上限，已跳过。", False
+        if declared_size > remaining_bytes:
+            return None, "已达到 20 MiB 图片总量上限，剩余图片未处理。", True
+
+        image_bytes = await response.body()
+        if len(image_bytes) > _MAX_IMAGE_BYTES:
+            return None, "图片超过 5 MiB 上限，已跳过。", False
+        if len(image_bytes) > remaining_bytes:
+            return None, "已达到 20 MiB 图片总量上限，剩余图片未处理。", True
+        return image_bytes, None, False
+    except FetchError:
+        raise
+    except Exception:
+        return None, "图片下载失败，已跳过。", False
+    finally:
+        if response is not None:
+            try:
+                await response.dispose()
+            except Exception:
+                pass
+
+
+async def _extract_image_text(context, page) -> str:
+    image_urls, truncated = await _read_note_image_urls(page)
+    if not image_urls:
+        return "未发现可读取的笔记图片。"
+
+    sections: list[str] = []
+    total_bytes = 0
+    for index, image_url in enumerate(image_urls, start=1):
+        await _raise_if_challenged(page)
+        image_bytes, download_message, stop_for_size = await _download_note_image(
+            context,
+            image_url,
+            _MAX_TOTAL_IMAGE_BYTES - total_bytes,
+        )
+        await _raise_if_challenged(page)
+        if stop_for_size:
+            sections.append(download_message or "已达到图片总量上限，剩余图片未处理。")
+            break
+        if image_bytes is None:
+            sections.append(f"图片 {index}：{download_message or '下载失败，已跳过。'}")
+            await _raise_if_challenged(page)
+            continue
+
+        total_bytes += len(image_bytes)
+        try:
+            text = await asyncio.to_thread(recognize_image_bytes, image_bytes)
+        except Exception:
+            text = ""
+            sections.append(f"图片 {index}：本机 OCR 暂不可用，已跳过。")
+        else:
+            sections.append(f"图片 {index}\n{text}" if text else f"图片 {index}：未识别到文字。")
+        await _raise_if_challenged(page)
+
+    if truncated:
+        sections.append("已达到最多 9 张图片的处理上限。")
+    return "\n\n".join(sections)
 
 
 async def _find_first_text(locator, selectors: tuple[str, ...]) -> str:
@@ -298,9 +479,14 @@ async def fetch_xhs(url: str) -> dict:
                 raise FetchError("未能提取小红书笔记正文；页面可能不可访问或结构已变化。")
             title = await _extract_title(page, raw)
 
+            image_text = await _extract_image_text(context, page)
             comments = await _extract_comments(page)
             comments_section = "\n".join(comments) if comments else "未获取到符合条件的评论。"
-            raw = f"{raw}\n\n## 评论\n\n{comments_section}"
+            raw = (
+                f"## 图片文字\n\n{image_text}\n\n"
+                f"## 正文\n\n{raw}\n\n"
+                f"## 高赞评论\n\n{comments_section}"
+            )
 
             return {
                 "source_type": "xhs",
